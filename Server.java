@@ -1,71 +1,48 @@
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.net.ServerSocket;
-import java.net.Socket;
-import java.io.PrintWriter;
+import java.io.*;
+import java.net.*;
+import java.nio.file.*;
+import java.util.concurrent.*;
 
-/*
- * Server Requirements:
- * - Listen for TCP connections.
- * - Support multiple clients concurrently.
- * - Handle LIST, INFO, GET, and ERROR commands.
- * - Validate filename, offset, and length.
- * - Send only the requested file range.
- * - Support Traditional I/O and NIO/native transfer.
- * - Handle resources and invalid requests safely.
- * - Support performance testing with 1 and 10 workers.
- */
+public class Server {
+    static final int PORT = 5000;
+    static final int POOL_SIZE = 20; // must be >= 10 workers x number of clients you test with
+    static final Path FILES_DIR = Paths.get("files");
 
-class Server {
-    // Create a server socket 
-    ServerSocket serverSocket = new ServerSocket(5000);
-
-    while (true) {
-        Socket client = serverSocket.accept();
-
-        // Create "in" for recieve input from client
-        BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream()));
-        
-        // Create "out" for send output to client
-        PrintWriter out = new PrintWriter(client.getOutputStream(), true);
-
-        // Read input from client
-        String request = in.readLine();
-        String[] parts = request.split(" ");
-
-        if (request.equals("LIST")) {
-            // request LIST
-            // respond FILE <name> <size> <hash>
-
-            // send file list to client
-            
-            
-
-        } else if (request.startsWith("INFO")) {
-            // request INFO <filename>
-            // respond SIZE <bytes> or ERROR <code> <message>
-            String filename = parts[1];
-
-
-            
-        } else if (request.startsWith("GET")) {
-            // request GET <filename> <offset> <length>
-            // respond DATA <bytes> or ERROR <code> <message>
-            String filename = parts[1];
-            long offset = Long.valueOf(parts[2]);
-            long length = Long.valueOf(parts[3]);
-
-        } else if (request.startsWith("ERROR")) {
-            // request ERROR <code> <message>
-            // respond ข้อความที่ Client นำไปจัดการได้
-            String code = parts[1];
-            String message = parts[2];
+    public static void main(String[] args) throws IOException {
+        ExecutorService pool = Executors.newFixedThreadPool(POOL_SIZE);
+        try (ServerSocket ss = new ServerSocket(PORT)) {
+            System.out.println("Server listening on port " + PORT);
+            while (true) {
+                Socket s = ss.accept();
+                pool.submit(() -> handle(s));
+            }
         }
-
-        // respond to client request
-        System.out.println("Client: " + request);
-
-
     }
 
+    static void handle(Socket s) {
+        try (s;
+                BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream()));
+                OutputStream out = s.getOutputStream()) {
+
+            String line;
+            while ((line = in.readLine()) != null) {
+                String[] p = line.trim().split(" ");
+                System.out.println("Client: " + line);
+
+                switch (p[0]) {
+                    case "LIST" -> send(out, "TODO LIST\n");
+                    case "INFO" -> send(out, "TODO INFO\n");
+                    case "GET" -> send(out, "TODO GET\n");
+                    default -> send(out, "ERROR 400 Unknown command\n");
+                }
+            }
+        } catch (IOException e) {
+            System.err.println("Client error: " + e.getMessage());
+        }
+    }
+
+    static void send(OutputStream out, String msg) throws IOException {
+        out.write(msg.getBytes("UTF-8"));
+        out.flush();
+    }
 }
