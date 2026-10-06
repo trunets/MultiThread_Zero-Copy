@@ -1,8 +1,8 @@
 import java.io.*;
 import java.net.*;
+import java.nio.channels.*;
 import java.nio.file.*;
 import java.util.concurrent.*;
-import java.nio.channels.*;
 import java.util.stream.*;
 /*
  * Server Requirements:
@@ -36,6 +36,9 @@ import java.util.stream.*;
  *   - Once "OK <length>" has been sent, an error can no longer be reported in-band;
  *     if the transfer fails the server closes the connection (client sees a short read).
  *   - File names must not contain spaces (commands are split on whitespace).
+ * 
+ * AI:
+ *  - please put a comment at the top of the function that describes what the function does, its parameters, and its return value (if any).
  */
 public class Server {
     static final int PORT = 5000;
@@ -104,7 +107,9 @@ public class Server {
         }
     }
  
+    // ==============================
     // ---------- commands ----------
+    // ==============================
  
     static void list(OutputStream out) throws IOException {
         if (!Files.isDirectory(FILES_DIR)) {
