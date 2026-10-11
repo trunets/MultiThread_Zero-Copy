@@ -16,18 +16,18 @@ public class Client {
 
     public static void main(String[] args) throws Exception {
 
-        // Usage: java Client <file> <output> <workers> <IO|NIO>
-        if (args.length < 4) {
-            System.out.println(
-                    "Usage: java Client <file> <output> <workers> <IO|NIO>"
-            );
-            return;
+        // Usage: java Client <file> <output> <IO|NIO> [workers]
+        if (args.length < 3) {
+        System.out.println(
+                "Usage: java Client <file> <output> <IO|NIO> [workers=10]"
+        );
+        return;
         }
 
         String fileName = args[0];
         Path output = Paths.get(args[1]);
-        int workers = Integer.parseInt(args[2]);
-        String mode = args[3].toUpperCase();
+        String mode = args[2].toUpperCase();
+        int workers = args.length > 3 ? Integer.parseInt(args[3]) : 10;
 
         if (workers < 1) {
             throw new IllegalArgumentException(
@@ -127,10 +127,18 @@ public class Client {
 
         // Verify the final file size.
         if (finalSize != fileSize) {
-            throw new IOException(
-                    "File size verification failed"
-            );
+                throw new IOException("File size verification failed");
         }
+
+        // Verify the hash against the server's copy.
+        String expected = getRemoteHash(fileName);
+        System.out.println("Expected SHA-256: " + expected);
+
+        if (!hash.equalsIgnoreCase(expected)) {
+                throw new IOException("Hash verification failed");
+        }
+
+        System.out.println("Verification: PASS");
 
         System.out.println("Verification: PASS");
     }
@@ -170,6 +178,26 @@ public class Client {
         }
     }
 
+    //Get the remote file's SHA-256 using HASH.
+    static String getRemoteHash(String filename) throws IOException{
+        try(SocketChannel channel = connect()){
+                sendLine(channel, "HASH" + filename);
+                String response = readLine(channel);
+
+                if (response == null) {
+                        throw new EOFException("Server disconnected");
+                }
+                if (response.startsWith("ERROR")) {
+                        throw new IOException(response);
+                }
+
+                if (!response.startsWith("HASH ")) {
+                throw new IOException("Invalid response: " + response);
+                }
+                return response.substring(5).trim();
+        }
+    }
+
     // Create a TCP connection to the server.
     static SocketChannel connect()
             throws IOException {
@@ -187,32 +215,16 @@ public class Client {
         return channel;
     }
 
-    // Divide the file into non-overlapping ranges.
-    static List<Range> createRanges(
-            long fileSize,
-            int workers
-    ) {
-
+    // Divide the file into non-overlapping ranges. (Last worker takes the remaning bytes)
+    static List<Range> createRanges(long fileSize, int workers){
         List<Range> ranges = new ArrayList<>();
-
         long base = fileSize / workers;
-        long remainder = fileSize % workers;
-
         long offset = 0;
-
-        for (int i = 0; i < workers; i++) {
-
-            // Give the remaining bytes to the first workers.
-            long length =
-                    base + (i < remainder ? 1 : 0);
-
-            ranges.add(
-                    new Range(offset, length)
-            );
-
-            offset += length;
+        for(int i =0; i < workers; i++){
+                long length = (i == workers - 1) ? fileSize - offset : base;
+                ranges.add(new Range(offset, length));
+                offset += length;
         }
-
         return ranges;
     }
 

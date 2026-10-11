@@ -5,6 +5,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.concurrent.*;
 import java.util.stream.*;
+import java.security.*;
 
 public class Server {
 
@@ -65,6 +66,7 @@ public class Server {
                     case "LIST" -> list(out);
                     case "INFO" -> info(out, p);
                     case "GET" -> get(client, out, p);
+                    case "HASH" -> hash(out, p);
                     default -> error(out, 400, "Unknown command");
                 }
             }
@@ -160,6 +162,41 @@ public class Server {
         }
 
         send(out, "SIZE " + Files.size(file) + "\n");
+    }
+
+    //Return the SHA-256 of one file.
+    static void hash(OutputStream out, String[] p) throws IOException{
+        if(p.length < 2){
+            error(out, 400, "Usage: HASH <file>");
+            return;
+        }
+
+        Path file = resolve(p[1]);
+
+        if(file == null){
+            error(out, 404, "File not found");
+            return;
+        }
+
+        try{
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            
+            try(InputStream in = Files.newInputStream(file)){
+                byte[] buf = new byte[BUF_SIZE];
+                int read;
+                while((read = in.read(buf)) != -1){
+                    digest.update(buf, 0, read);
+                }
+            }
+            StringBuilder sb = new StringBuilder();
+                for(byte b : digest.digest()){
+                    sb.append(String.format("%02x", b));
+                }
+
+            send(out, "HASH" + sb + "\n");
+        }catch (NoSuchAlgorithmException e){
+            error(out, 500, "SHA-256 not available");
+        }
     }
 
     // Validate GET and start the selected transfer method.
