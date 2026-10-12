@@ -181,7 +181,7 @@ public class Client {
     //Get the remote file's SHA-256 using HASH.
     static String getRemoteHash(String filename) throws IOException{
         try(SocketChannel channel = connect()){
-                sendLine(channel, "HASH" + filename);
+                sendLine(channel, "HASH " + filename);
                 String response = readLine(channel);
 
                 if (response == null) {

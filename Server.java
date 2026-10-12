@@ -193,7 +193,7 @@ public class Server {
                     sb.append(String.format("%02x", b));
                 }
 
-            send(out, "HASH" + sb + "\n");
+            send(out, "HASH " + sb + "\n");
         }catch (NoSuchAlgorithmException e){
             error(out, 500, "SHA-256 not available");
         }

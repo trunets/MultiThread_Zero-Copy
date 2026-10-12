@@ -1,0 +1,60 @@
+== IO workers=1 run=1
+Time: 0.298 seconds
+Throughput: 336.13 MB/s
+Verification: PASS
+Verification: PASS
+== IO workers=1 run=2
+Time: 0.415 seconds
+Throughput: 240.95 MB/s
+Verification: PASS
+Verification: PASS
+== IO workers=1 run=3
+Time: 0.326 seconds
+Throughput: 306.58 MB/s
+Verification: PASS
+Verification: PASS
+== IO workers=10 run=1
+Time: 0.072 seconds
+Throughput: 1396.47 MB/s
+Verification: PASS
+Verification: PASS
+== IO workers=10 run=2
+Time: 0.063 seconds
+Throughput: 1577.01 MB/s
+Verification: PASS
+Verification: PASS
+== IO workers=10 run=3
+Time: 0.047 seconds
+Throughput: 2124.34 MB/s
+Verification: PASS
+Verification: PASS
+== NIO workers=1 run=1
+Time: 0.123 seconds
+Throughput: 809.80 MB/s
+Verification: PASS
+Verification: PASS
+== NIO workers=1 run=2
+Time: 0.238 seconds
+Throughput: 420.30 MB/s
+Verification: PASS
+Verification: PASS
+== NIO workers=1 run=3
+Time: 0.159 seconds
+Throughput: 630.73 MB/s
+Verification: PASS
+Verification: PASS
+== NIO workers=10 run=1
+Time: 0.071 seconds
+Throughput: 1400.08 MB/s
+Verification: PASS
+Verification: PASS
+== NIO workers=10 run=2
+Time: 0.076 seconds
+Throughput: 1315.65 MB/s
+Verification: PASS
+Verification: PASS
+== NIO workers=10 run=3
+Time: 0.066 seconds
+Throughput: 1507.44 MB/s
+Verification: PASS
+Verification: PASS
