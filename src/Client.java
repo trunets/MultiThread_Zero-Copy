@@ -65,8 +65,9 @@ public class Client {
         List<Range> ranges =
                 createRanges(fileSize, workers);
 
+        // Create a virtual thread for each download worker.
         ExecutorService pool =
-                Executors.newFixedThreadPool(workers);
+                Executors.newVirtualThreadPerTaskExecutor();
 
         List<Future<?>> tasks = new ArrayList<>();
 
