@@ -10,149 +10,291 @@ import java.util.concurrent.*;
 
 public class Client {
 
-    static final String HOST = "localhost";
-    static final int PORT = 5000;
+    static final String SERVER_HOST = "localhost";
+    static final int SERVER_PORT = 5000;
     static final int BUFFER_SIZE = 64 * 1024;
 
     public static void main(String[] args) throws Exception {
 
-        // Usage: java Client <file> <output> <workers> <IO|NIO>
-        if (args.length < 4) {
-            System.out.println(
-                    "Usage: java Client <file> <output> <workers> <IO|NIO>"
-            );
+        // Support server commands as well as the original download syntax.
+        if (args.length >= 1) {
+            switch (args[0].toUpperCase(Locale.ROOT)) {
+                case "LIST" -> {
+                    if (args.length != 1) {
+                        printUsage();
+                        return;
+                    }
+                    listRemoteFiles();
+                    return;
+                }
+                case "INFO" -> {
+                    if (args.length != 2) {
+                        printUsage();
+                        return;
+                    }
+                    long size = getRemoteFileSize(args[1]);
+                    System.out.println("File: " + args[1]);
+                    System.out.println("Size: " + size + " bytes");
+                    return;
+                }
+                case "HASH" -> {
+                    if (args.length != 2) {
+                        printUsage();
+                        return;
+                    }
+                    System.out.println("File: " + args[1]);
+                    System.out.println("SHA-256: " + getRemoteFileHash(args[1]));
+                    return;
+                }
+                case "GET" -> {
+                    if (args.length != 5) {
+                        printUsage();
+                        return;
+                    }
+                    long offset = Long.parseLong(args[2]);
+                    long length = Long.parseLong(args[3]);
+                    String mode = args[4].toUpperCase(Locale.ROOT);
+                    if (offset < 0 || length < 0) {
+                        throw new IllegalArgumentException("Offset and length must be non-negative");
+                    }
+                    if (!mode.equals("IO") && !mode.equals("NIO")) {
+                        throw new IllegalArgumentException("Mode must be IO or NIO");
+                    }
+                    Path outputDirectory = Paths.get("files").toAbsolutePath().normalize();
+                    Files.createDirectories(outputDirectory);
+                    Path safeName = Paths.get(args[1]).getFileName();
+                    if (safeName == null || safeName.toString().isBlank()) {
+                        throw new IllegalArgumentException("File must be a valid filename");
+                    }
+                    Path outputPath = outputDirectory.resolve(
+                            safeName.toString() + ".range-" + offset + "-" + length
+                    ).normalize();
+                    getRemoteByteRange(args[1], offset, length, mode, outputPath);
+                    System.out.println("GET completed.");
+                    System.out.println("Output: " + outputPath);
+                    System.out.println("Offset: " + offset);
+                    System.out.println("Length: " + Files.size(outputPath) + " bytes");
+                    return;
+                }
+                case "HELP", "--HELP", "-H" -> {
+                    printUsage();
+                    return;
+                }
+                default -> {
+                    // Continue to the original download argument parser.
+                }
+            }
+        }
+
+        // Usage: java -cp src Client <file> <output> <workers> <IO|NIO>
+        if (args.length != 4) {
+            printUsage();
             return;
         }
 
         String fileName = args[0];
-        Path output = Paths.get(args[1]);
-        int workers = Integer.parseInt(args[2]);
-        String mode = args[3].toUpperCase();
+        // Always save downloaded files inside the local files/ directory.
+        // Use only the supplied output filename to prevent writing elsewhere.
+        Path outputName = Paths.get(args[1]).getFileName();
+        if (outputName == null || outputName.toString().isBlank()) {
+            throw new IllegalArgumentException("Output must be a valid filename");
+        }
+        Path outputDirectory = Paths.get("files").toAbsolutePath().normalize();
+        Files.createDirectories(outputDirectory);
+        Path outputPath = outputDirectory.resolve(outputName).normalize();
+        if (!outputPath.startsWith(outputDirectory)) {
+            throw new IllegalArgumentException("Output must be inside the files directory");
+        }
+        int workerCount = Integer.parseInt(args[2]);
+        String transferMode = args[3].toUpperCase(Locale.ROOT);
 
-        if (workers < 1) {
+        if (workerCount < 1) {
             throw new IllegalArgumentException(
                     "Workers must be at least 1"
             );
         }
 
-        if (!mode.equals("IO") && !mode.equals("NIO")) {
+        if (!transferMode.equals("IO")
+                && !transferMode.equals("NIO")) {
             throw new IllegalArgumentException(
                     "Mode must be IO or NIO"
             );
         }
 
-        // Get the remote file size.
-        long fileSize = getFileSize(fileName);
+        // Get the source file size from the server.
+        long sourceFileSize = getRemoteFileSize(fileName);
 
         System.out.println("File: " + fileName);
-        System.out.println("Size: " + fileSize + " bytes");
-        System.out.println("Workers: " + workers);
-        System.out.println("Mode: " + mode);
+        System.out.println("Output: " + outputPath);
+        System.out.println("Size: " + sourceFileSize + " bytes");
+        System.out.println("Workers: " + workerCount);
+        System.out.println("Mode: " + transferMode);
 
-        // Create the output file with the correct size.
-        Path parent = output.toAbsolutePath().getParent();
+        // Create the output directory if it does not exist.
+        Path parentDirectory = outputPath.toAbsolutePath().getParent();
 
-        if (parent != null) {
-            Files.createDirectories(parent);
+        if (parentDirectory != null) {
+            Files.createDirectories(parentDirectory);
         }
 
-        try (RandomAccessFile file =
-                     new RandomAccessFile(output.toFile(), "rw")) {
-            file.setLength(fileSize);
+        // Create or resize the destination file.
+        try (RandomAccessFile outputFile =
+                     new RandomAccessFile(outputPath.toFile(), "rw")) {
+            outputFile.setLength(sourceFileSize);
         }
 
-        // Split the file into non-overlapping ranges.
-        List<Range> ranges =
-                createRanges(fileSize, workers);
+        // Split the source file into non-overlapping byte ranges.
+        List<ByteRange> downloadRanges =
+                createDownloadRanges(sourceFileSize, workerCount);
 
-        // Create a virtual thread for each download worker.
-        ExecutorService pool =
+        // Create one virtual thread for each download worker.
+        ExecutorService downloadExecutor =
                 Executors.newVirtualThreadPerTaskExecutor();
 
-        List<Future<?>> tasks = new ArrayList<>();
+        List<Future<?>> downloadTasks = new ArrayList<>();
 
-        long start = System.nanoTime();
+        long startTime = System.nanoTime();
 
-        // Start one connection for each range.
-        for (int i = 0; i < workers; i++) {
+        try {
+            // Start one download task for each byte range.
+            for (int i = 0; i < workerCount; i++) {
 
-            final int workerId = i + 1;
-            final Range range = ranges.get(i);
+                final int workerId = i + 1;
+                final ByteRange byteRange = downloadRanges.get(i);
 
-            tasks.add(pool.submit(() -> {
-                try {
-                    downloadRange(
-                            workerId,
-                            fileName,
-                            output,
-                            range,
-                            mode
-                    );
-                } catch (Exception e) {
-                    throw new RuntimeException(
-                            "Worker " + workerId + " failed",
-                            e
-                    );
+                downloadTasks.add(downloadExecutor.submit(() -> {
+                    try {
+                        downloadByteRange(
+                                workerId,
+                                fileName,
+                                outputPath,
+                                byteRange,
+                                transferMode
+                        );
+                    } catch (Exception e) {
+                        throw new RuntimeException(
+                                "Worker " + workerId + " failed",
+                                e
+                        );
+                    }
+                }));
+            }
+
+            // Wait until every worker finishes successfully.
+            for (Future<?> downloadTask : downloadTasks) {
+                downloadTask.get();
+            }
+
+        } finally {
+            // Ensure the executor is closed even if a worker fails.
+            downloadExecutor.shutdown();
+
+            try {
+                if (!downloadExecutor.awaitTermination(
+                        1, TimeUnit.MINUTES)) {
+                    downloadExecutor.shutdownNow();
                 }
-            }));
+            } catch (InterruptedException e) {
+                downloadExecutor.shutdownNow();
+                Thread.currentThread().interrupt();
+                throw e;
+            }
         }
 
-        // Wait for all workers to finish.
-        for (Future<?> task : tasks) {
-            task.get();
+        long endTime = System.nanoTime();
+        double elapsedSeconds =
+                (endTime - startTime) / 1_000_000_000.0;
+
+        // Verify the final file size.
+        long downloadedFileSize = Files.size(outputPath);
+
+        if (downloadedFileSize != sourceFileSize) {
+            System.out.println("Verification: FAIL (size mismatch)");
+            throw new IOException(
+                    "File size verification failed. Expected "
+                            + sourceFileSize + " bytes but got "
+                            + downloadedFileSize + " bytes."
+            );
         }
 
-        pool.shutdown();
+        // Calculate the source and destination SHA-256 hashes.
+        String sourceHash = getRemoteFileHash(fileName);
+        String downloadedHash = calculateSha256(outputPath);
 
-        long end = System.nanoTime();
+        double fileSizeMB =
+                downloadedFileSize / (1024.0 * 1024.0);
 
-        double seconds =
-                (end - start) / 1_000_000_000.0;
-
-        // Verify size and calculate SHA-256.
-        long finalSize = Files.size(output);
-        String hash = sha256(output);
-
-        double mb =
-                finalSize / (1024.0 * 1024.0);
-
-        double throughput =
-                mb / seconds;
+        double throughputMBps =
+                elapsedSeconds > 0
+                        ? fileSizeMB / elapsedSeconds
+                        : 0.0;
 
         System.out.println();
         System.out.println("Download completed.");
-        System.out.printf("Time: %.3f seconds%n", seconds);
-        System.out.printf("Throughput: %.2f MB/s%n", throughput);
-        System.out.println("Size: " + finalSize + " bytes");
-        System.out.println("SHA-256: " + hash);
+        System.out.printf("Time: %.3f seconds%n", elapsedSeconds);
+        System.out.printf("Throughput: %.2f MB/s%n", throughputMBps);
+        System.out.println("Size: " + downloadedFileSize + " bytes");
+        System.out.println("Source SHA-256: " + sourceHash);
+        System.out.println("Output SHA-256: " + downloadedHash);
 
-        // Verify the final file size.
-        if (finalSize != fileSize) {
+        // Only report PASS when both hashes match.
+        if (!sourceHash.equals(downloadedHash)) {
+            System.out.println(
+                    "Verification: FAIL (SHA-256 mismatch)"
+            );
             throw new IOException(
-                    "File size verification failed"
+                    "File content verification failed."
             );
         }
 
         System.out.println("Verification: PASS");
     }
 
-    // Get the remote file size using INFO.
-    static long getFileSize(String fileName)
+    static void printUsage() {
+        System.out.println("Usage:");
+        System.out.println("  java -cp src Client LIST");
+        System.out.println("  java -cp src Client INFO <file>");
+        System.out.println("  java -cp src Client HASH <file>");
+        System.out.println("  java -cp src Client GET <file> <offset> <length> <IO|NIO>");
+        System.out.println("  java -cp src Client <file> <output> <workers> <IO|NIO>");
+    }
+
+    // List files using the LIST command. The response ends with END.
+    static void listRemoteFiles() throws IOException {
+        try (SocketChannel socket = connectToServer()) {
+            sendLine(socket, "LIST");
+
+            boolean receivedEnd = false;
+            String response;
+            while ((response = readLine(socket)) != null) {
+                if (response.equals("END")) {
+                    receivedEnd = true;
+                    break;
+                }
+                if (response.startsWith("ERROR")) {
+                    throw new IOException(response);
+                }
+                System.out.println(response);
+            }
+
+            if (!receivedEnd) {
+                throw new EOFException("Server disconnected before LIST response ended");
+            }
+        }
+    }
+
+    // Get the source file size using the INFO command.
+    static long getRemoteFileSize(String fileName)
             throws IOException {
 
-        try (SocketChannel channel = connect()) {
+        try (SocketChannel socket = connectToServer()) {
 
-            sendLine(
-                    channel,
-                    "INFO " + fileName
-            );
+            sendLine(socket, "INFO " + fileName);
 
-            String response = readLine(channel);
+            String response = readLine(socket);
 
             if (response == null) {
-                throw new EOFException(
-                        "Server disconnected"
-                );
+                throw new EOFException("Server disconnected");
             }
 
             if (response.startsWith("ERROR")) {
@@ -165,290 +307,330 @@ public class Client {
                 );
             }
 
-            return Long.parseLong(
-                    response.substring(5).trim()
-            );
+            return Long.parseLong(response.substring(5).trim());
         }
     }
 
-    // Create a TCP connection to the server.
-    static SocketChannel connect()
+    // Get the source file's SHA-256 hash using the HASH command.
+    static String getRemoteFileHash(String fileName)
             throws IOException {
 
-        SocketChannel channel =
-                SocketChannel.open();
+        try (SocketChannel socket = connectToServer()) {
 
-        channel.connect(
-                new InetSocketAddress(
-                        HOST,
-                        PORT
-                )
-        );
+            sendLine(socket, "HASH " + fileName);
 
-        return channel;
-    }
-
-    // Divide the file into non-overlapping ranges.
-    static List<Range> createRanges(
-            long fileSize,
-            int workers
-    ) {
-
-        List<Range> ranges = new ArrayList<>();
-
-        long base = fileSize / workers;
-        long remainder = fileSize % workers;
-
-        long offset = 0;
-
-        for (int i = 0; i < workers; i++) {
-
-            // Give the remaining bytes to the first workers.
-            long length =
-                    base + (i < remainder ? 1 : 0);
-
-            ranges.add(
-                    new Range(offset, length)
-            );
-
-            offset += length;
-        }
-
-        return ranges;
-    }
-
-    // Download one range using its own connection.
-    static void downloadRange(
-            int workerId,
-            String fileName,
-            Path output,
-            Range range,
-            String mode
-    ) throws IOException {
-
-        try (SocketChannel channel = connect()) {
-
-            // Request only this worker's range.
-            sendLine(
-                    channel,
-                    "GET "
-                            + fileName
-                            + " "
-                            + range.offset
-                            + " "
-                            + range.length
-                            + " "
-                            + mode
-            );
-
-            String response =
-                    readLine(channel);
+            String response = readLine(socket);
 
             if (response == null) {
-                throw new EOFException(
-                        "Server disconnected"
-                );
+                throw new EOFException("Server disconnected");
             }
 
             if (response.startsWith("ERROR")) {
                 throw new IOException(response);
             }
 
-            if (!response.equals(
-                    "OK " + range.length)) {
-
+            if (!response.startsWith("HASH ")) {
                 throw new IOException(
                         "Invalid response: " + response
                 );
             }
 
-            // Write received bytes to this range.
-            receiveRange(
-                    channel,
-                    output,
-                    range
+            return response.substring(5).trim();
+        }
+    }
+
+    // Request an exact byte range and save only that range as a separate local file.
+    static void getRemoteByteRange(String fileName, long offset, long length,
+                                   String transferMode, Path outputPath) throws IOException {
+        try (SocketChannel socket = connectToServer()) {
+            sendLine(socket, "GET " + fileName + " " + offset + " " + length + " " + transferMode);
+            String response = readLine(socket);
+            if (response == null) throw new EOFException("Server disconnected");
+            if (response.startsWith("ERROR")) throw new IOException(response);
+            if (!response.equals("OK " + length)) {
+                throw new IOException("Invalid response: " + response);
+            }
+
+            try (FileChannel output = FileChannel.open(outputPath,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING,
+                    StandardOpenOption.WRITE)) {
+                ByteBuffer buffer = ByteBuffer.allocate(BUFFER_SIZE);
+                long remaining = length;
+                while (remaining > 0) {
+                    buffer.clear();
+                    buffer.limit((int) Math.min(buffer.capacity(), remaining));
+                    int bytesRead = socket.read(buffer);
+                    if (bytesRead < 0) throw new EOFException("Connection closed before range completed");
+                    if (bytesRead == 0) continue;
+                    buffer.flip();
+                    while (buffer.hasRemaining()) output.write(buffer);
+                    remaining -= bytesRead;
+                }
+            }
+            if (Files.size(outputPath) != length) {
+                throw new IOException("Range size verification failed");
+            }
+        }
+    }
+
+    // Open a TCP connection to the server.
+    static SocketChannel connectToServer()
+            throws IOException {
+
+        SocketChannel socket = SocketChannel.open();
+
+        try {
+            socket.connect(
+                    new InetSocketAddress(
+                            SERVER_HOST,
+                            SERVER_PORT
+                    )
             );
+            return socket;
+        } catch (IOException e) {
+            socket.close();
+            throw e;
+        }
+    }
+
+    // Divide the file into non-overlapping byte ranges.
+    static List<ByteRange> createDownloadRanges(
+            long fileSize,
+            int workerCount
+    ) {
+
+        List<ByteRange> downloadRanges = new ArrayList<>();
+
+        long baseRangeLength = fileSize / workerCount;
+        long currentOffset = 0;
+
+        for (int i = 0; i < workerCount; i++) {
+            // The first workers receive equal-sized ranges.
+            // The last worker receives all remaining bytes, including the remainder.
+            long rangeLength = (i == workerCount - 1)
+                    ? fileSize - currentOffset
+                    : baseRangeLength;
+
+            downloadRanges.add(new ByteRange(currentOffset, rangeLength));
+            currentOffset += rangeLength;
+        }
+
+        // Keep this invariant explicit: every source byte is assigned exactly once.
+        if (currentOffset != fileSize) {
+            throw new IllegalStateException("Byte ranges do not cover the entire file");
+        }
+
+        return downloadRanges;
+    }
+
+    // Download one byte range using a separate TCP connection.
+    static void downloadByteRange(
+            int workerId,
+            String fileName,
+            Path outputPath,
+            ByteRange byteRange,
+            String transferMode
+    ) throws IOException {
+
+        try (SocketChannel socket = connectToServer()) {
+
+            // Request the assigned offset and length from the server.
+            sendLine(
+                    socket,
+                    "GET "
+                            + fileName
+                            + " "
+                            + byteRange.offset
+                            + " "
+                            + byteRange.length
+                            + " "
+                            + transferMode
+            );
+
+            String response = readLine(socket);
+
+            if (response == null) {
+                throw new EOFException("Server disconnected");
+            }
+
+            if (response.startsWith("ERROR")) {
+                throw new IOException(response);
+            }
+
+            if (!response.equals("OK " + byteRange.length)) {
+                throw new IOException(
+                        "Invalid response: " + response
+                );
+            }
+
+            // Write downloaded bytes at the correct file offset.
+            receiveByteRange(socket, outputPath, byteRange);
 
             System.out.println(
                     "Worker " + workerId
                             + " completed: offset="
-                            + range.offset
+                            + byteRange.offset
                             + ", length="
-                            + range.length
+                            + byteRange.length
             );
         }
     }
 
-    // Receive bytes and write directly to the correct offset.
-    static void receiveRange(
-            SocketChannel channel,
-            Path output,
-            Range range
+    // Receive bytes and write them to the assigned file positions.
+    static void receiveByteRange(
+            SocketChannel socket,
+            Path outputPath,
+            ByteRange byteRange
     ) throws IOException {
 
-        try (RandomAccessFile file =
-                     new RandomAccessFile(
-                             output.toFile(),
-                             "rw"
-                     )) {
+        try (RandomAccessFile outputFile =
+                     new RandomAccessFile(outputPath.toFile(), "rw")) {
 
-            FileChannel outputChannel =
-                    file.getChannel();
+            FileChannel outputChannel = outputFile.getChannel();
+            ByteBuffer buffer = ByteBuffer.allocate(BUFFER_SIZE);
 
-            ByteBuffer buffer =
-                    ByteBuffer.allocate(BUFFER_SIZE);
+            long remainingBytes = byteRange.length;
+            long currentPosition = byteRange.offset;
 
-            long remaining = range.length;
-            long position = range.offset;
+            // Continue reading until the entire range is received.
+            while (remainingBytes > 0) {
 
-            // Read until this range is complete.
-            while (remaining > 0) {
-
-                int size = (int) Math.min(
+                int requestedBytes = (int) Math.min(
                         BUFFER_SIZE,
-                        remaining
+                        remainingBytes
                 );
 
                 buffer.clear();
-                buffer.limit(size);
+                buffer.limit(requestedBytes);
 
-                int read = channel.read(buffer);
+                int bytesRead = socket.read(buffer);
 
-                if (read == -1) {
+                if (bytesRead == -1) {
                     throw new EOFException(
-                            "Connection closed early"
+                            "Connection closed before range completed"
                     );
                 }
 
-                if (read == 0) {
+                if (bytesRead == 0) {
                     continue;
                 }
 
                 buffer.flip();
 
-                // Write at the assigned file position.
+                // Positional writes prevent workers overwriting each other.
                 while (buffer.hasRemaining()) {
-                    outputChannel.write(
+                    int bytesWritten = outputChannel.write(
                             buffer,
-                            position
+                            currentPosition
                     );
+
+                    if (bytesWritten == 0) {
+                        continue;
+                    }
+
+                    currentPosition += bytesWritten;
                 }
 
-                position += read;
-                remaining -= read;
+                remainingBytes -= bytesRead;
             }
         }
     }
 
-    // Send one command line to the server.
+    // Send a UTF-8 command terminated by a newline.
     static void sendLine(
-            SocketChannel channel,
-            String line
+            SocketChannel socket,
+            String message
     ) throws IOException {
 
         ByteBuffer buffer =
-                StandardCharsets.UTF_8.encode(
-                        line + "\n"
-                );
+                StandardCharsets.UTF_8.encode(message + "\n");
 
         while (buffer.hasRemaining()) {
-            channel.write(buffer);
+            socket.write(buffer);
         }
     }
 
-    // Read one response line from the server.
-    static String readLine(
-            SocketChannel channel
-    ) throws IOException {
+    // Read one newline-terminated response from the server.
+    static String readLine(SocketChannel socket)
+            throws IOException {
 
-        ByteArrayOutputStream output =
+        ByteArrayOutputStream responseBytes =
                 new ByteArrayOutputStream();
 
-        ByteBuffer buffer =
-                ByteBuffer.allocate(1);
+        ByteBuffer buffer = ByteBuffer.allocate(1);
 
         while (true) {
-
             buffer.clear();
 
-            int read = channel.read(buffer);
+            int bytesRead = socket.read(buffer);
 
-            if (read == -1) {
-
-                if (output.size() == 0) {
+            if (bytesRead == -1) {
+                if (responseBytes.size() == 0) {
                     return null;
                 }
 
-                throw new EOFException(
-                        "Connection closed"
-                );
+                throw new EOFException("Connection closed");
             }
 
-            if (read == 0) {
+            if (bytesRead == 0) {
                 continue;
             }
 
             buffer.flip();
+            byte currentByte = buffer.get();
 
-            byte value = buffer.get();
-
-            if (value == '\n') {
+            if (currentByte == '\n') {
                 break;
             }
 
-            if (value != '\r') {
-                output.write(value);
+            if (currentByte != '\r') {
+                responseBytes.write(currentByte);
             }
         }
 
-        return output.toString(
-                StandardCharsets.UTF_8
-        );
+        return responseBytes.toString(StandardCharsets.UTF_8);
     }
 
-    // Calculate SHA-256 for file verification.
-    static String sha256(Path file)
-            throws Exception {
+    // Calculate the SHA-256 hash of a local file.
+    static String calculateSha256(Path filePath)
+            throws IOException {
 
-        MessageDigest digest =
-                MessageDigest.getInstance("SHA-256");
+        final MessageDigest digest;
 
-        try (InputStream input =
-                     Files.newInputStream(file)) {
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException e) {
+            throw new IOException("SHA-256 is unavailable", e);
+        }
 
-            byte[] buffer =
-                    new byte[BUFFER_SIZE];
+        try (InputStream input = Files.newInputStream(filePath)) {
 
-            int read;
+            byte[] buffer = new byte[BUFFER_SIZE];
+            int bytesRead;
 
-            // Read the complete file.
-            while ((read = input.read(buffer)) != -1) {
-                digest.update(buffer, 0, read);
+            // Include every byte in the hash calculation.
+            while ((bytesRead = input.read(buffer)) != -1) {
+                digest.update(buffer, 0, bytesRead);
             }
         }
 
-        byte[] hash = digest.digest();
+        StringBuilder hashText = new StringBuilder();
 
-        StringBuilder result =
-                new StringBuilder();
-
-        // Convert hash bytes to hexadecimal.
-        for (byte b : hash) {
-            result.append(
-                    String.format("%02x", b)
-            );
+        // Convert the hash bytes to a hexadecimal string.
+        for (byte hashByte : digest.digest()) {
+            hashText.append(String.format("%02x", hashByte & 0xff));
         }
 
-        return result.toString();
+        return hashText.toString();
     }
 
-    // Store one worker's byte range.
-    static class Range {
+    // Store the offset and length assigned to one worker.
+    static class ByteRange {
 
         final long offset;
         final long length;
 
-        Range(long offset, long length) {
+        ByteRange(long offset, long length) {
             this.offset = offset;
             this.length = length;
         }
