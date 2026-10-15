@@ -9,7 +9,6 @@ import java.util.stream.*;
 public class Server {
 
     static final int PORT = 5000;
-    static final int POOL_SIZE = 20;
     static final Path FILES_DIR =
             Paths.get("files").toAbsolutePath().normalize();
     static final int BUF_SIZE = 64 * 1024;
@@ -18,7 +17,7 @@ public class Server {
 
         // Create workers for concurrent clients.
         ExecutorService pool =
-                Executors.newFixedThreadPool(POOL_SIZE);
+                Executors.newVirtualThreadPerTaskExecutor();
 
         // Start TCP server.
         try (ServerSocketChannel server =
